@@ -1,0 +1,154 @@
+library(tidyverse)
+library(janitor)
+library(glue)
+library(readxl)
+
+#Putting Lobbying info into R
+lob_agency <- read_csv("lobby/lob_agency.txt", quote="|",
+                       col_names=c("uniqid", "AgencyID", "Agency"))
+lob_agency <- bind_rows(lob_agency)
+
+lob_indus <- read_csv("lobby/lob_indus.txt", quote="|",
+                      col_names=c("client", "sub", "total", "year",
+                                  "Catcode"))  %>%
+  filter(year > 1999)
+lob_indus <- bind_rows(lob_indus)
+
+lob_lobbying <- read_csv("lobby/lob_lobbying.txt", quote="|",
+                         col_names=c("uniqid", "registrant_raw", "registrant", "isfirm", 
+                                     "client_raw", "client", "ultorg", "amount", "catcode", 
+                                     "source", "self", "IncludeNSFS", "use", "ind", "year",
+                                     "type", "typelong", "Affiliate"))  %>%
+  filter(year > 1999)
+lob_lobbying <- bind_rows(lob_lobbying)
+
+lob_issue <- read_csv("lobby/lob_issue.txt", quote="|",
+                      col_names=c("SI_ID", "uniqid", "IssueID", "Issue",
+                                  "SpecificIssue", "Year"))  %>%
+  filter(year > 1999)
+lob_issue <- bind_rows(lob_issue)
+
+#Putting imported data into a single data set
+y <- lob_lobbying %>% select(uniqid, ultorg, amount, year) %>% 
+  distinct() %>%
+  filter(!is.na(ultorg)) %>%
+  arrange(ultorg, uniqid)
+
+#Merging with list of orgs we want
+ultimate.org.info <- read.delim("~/Desktop/thesis/ultimate org info.txt")
+lobbying_info <- left_join(ultimate.org.info, y, by="ultorg")
+
+#Cleaning data
+cands <- list()
+for(year in c("08", "10", "12", "14", "16", "18")) {
+  cands[[year]] <- read_csv(glue("CampaignFin{year}/cands{year}.txt"), 
+                            quote="|",
+                            col_types=paste0(rep("c", 12), collapse=""),
+                            col_names = c("cycle", "feccandid",
+                                          "cid", "firstlastp",
+                                          "party", "distidrunfor",
+                                          "distidcurr", "currcand",
+                                          "cyclecand", "crpico",
+                                          "recipcode", "nopacs"))
+  
+}
+cands <- bind_rows(cands)
+tabyl(cands, cycle)
+write_rds(cands, "cands.rds")
+# cands <- read_rds("cands.rds")
+
+pacs <- list()
+for(year in c("08", "10", "12", "14", "16", "18")) {
+  pacs[[year]] <- read_csv(glue("CampaignFin{year}/pacs{year}.txt"), 
+                           quote="|",
+                           col_types=paste0(rep("c", 10), collapse=""),
+                           col_names = c("cycle", "fecrecno",
+                                         "pacid", "cid",
+                                         "amount", "date",
+                                         "realcode", "type",
+                                         "di", "feccandid"))
+  
+}
+pacs <- bind_rows(pacs)
+pacs <- mutate(pacs, amount=as.numeric(amount), data=as.Date(date))
+tabyl(pacs, cycle)
+write_rds(pacs, "pacs.rds")
+
+cmtes <- list()
+for(year in c("08", "10", "12", "14", "16", "18")) {
+  cmtes[[year]] <- read_csv(glue("CampaignFin{year}/cmtes{year}.txt"), 
+                            quote="|",
+                            col_types=paste0(rep("c", 14), collapse=""),
+                            col_names = c(str_to_lower(c("Cycle", "CmteID", 
+                                                         "PACShort", "Affiliate", 
+                                                         "Ultorg", "RecipID", 
+                                                         "RecipCode", "FECCandID", 
+                                                         "Party", "PrimCode", 
+                                                         "Source", "Sensitive", 
+                                                         "Foreign", "Active"))))
+  
+}
+cmtes <- bind_rows(cmtes)
+tabyl(cmtes, cycle)
+write_rds(cmtes, "cmtes.rds")
+
+#creating CSV with unique PACs and Organziations
+x <- cmtes %>% select(pacshort, ultorg) %>% distinct() %>%
+  filter(!is.na(ultorg)) %>%
+  arrange(ultorg, pacshort)
+write_csv(x, "unique_pacs_and_orgs.csv")
+
+#Summarizing PAC data, including parties
+res <- cmtes %>% 
+  select(cycle, cmteid, pacshort, ultorg) %>%
+  inner_join(pacs, by=c("cmteid"="pacid", "cycle")) %>%
+  inner_join(cands, by=c("cycle", "feccandid", "cid"))
+
+pac_summary <- res %>% filter(party=="D" | party=="R") %>%
+  group_by(ultorg, cycle, party) %>%
+  summarize(amount=sum(amount)) %>%
+  pivot_wider(names_from=party, values_from=amount, names_prefix="amount_") %>%
+  mutate(amount_D=ifelse(is.na(amount_D), 0, amount_D),
+         amount_R=ifelse(is.na(amount_R), 0, amount_R))
+
+ult_org_info <- pac_summary %>% group_by(ultorg, cycle) %>%
+  summarize(amount_R=sum(amount_R),
+            amount_D=sum(amount_D)) %>%
+  arrange(ultorg)
+write_csv(x, "ult_org_info.csv")
+
+#Combining all data into one merged dataset
+ultimate.org.info <- read.delim("~/Desktop/thesis/ultimate org info.txt")
+org_info <- left_join(ultimate.org.info, ult_org_info, by="ultorg")
+
+write_csv(org_info, "org_info_mergewithpacs.csv")
+
+ult_wide <- org_info %>% mutate(pct_R=amount_R/(amount_R+amount_D)) %>%
+  select(-amount_D, -amount_R) %>%
+  pivot_wider(names_from=cycle, values_from=pct_R, names_prefix="pct_R")
+
+#now, org_info is a list of how much $$ each SP500 company has spent on lobbying 
+#and ult_wide has info expressed as pct spent on dem or republican candidates
+
+#Beginning data analysis--finished in Tableau
+#per cycle contributions per sector
+sector_pac_spend <- org_info %>%
+  group_by(sector, cycle) %>% summarize(mean_pac_spend=mean((amount_R + amount_D)))
+
+#Per party spending
+sector_pac_spend_byparty <- org_info %>%
+  group_by(sector, cycle) %>% summarize(mean_pac_spend_R=mean(amount_R))
+                              summarize(mean_pac_spend_D=mean(amount_D))
+                              
+subind_pac_spend <- org_info %>%
+group_by(subind, cycle) %>% summarize(mean_pac_spend_R=mean(amount_R))
+                            summarize(mean_pac_spend_D=mean(amount_D))
+                            summarize(mean_pac_spend=mean((amount_R + amount_D)))
+  
+#Repeating with lobbying
+sector_lobby_spend <- lobbying_info %>%
+    group_by(sector, year) %>% summarize(mean_lobbying=mean(amount)) 
+
+subind_lobby_spend <- lobbying_info %>%
+  group_by(subind, year) %>% summarize(mean_subindlobby=mean(amount))
+write_csv(subind_lobby_spend, "subind_lobby_spend.csv")
